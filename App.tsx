@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect } from 'react';
 import Layout from './components/Layout';
 import Onboarding from './components/Onboarding';
@@ -7,6 +8,7 @@ import Settings from './components/Settings';
 import Strategy from './components/Strategy';
 import { UserProfile, Task, ChatMessage, ViewState, StrategicPlan } from './types';
 import { getProfile, saveProfile, getTasks, getChatHistory, getStrategicPlan } from './services/storage';
+import { Loader2 } from 'lucide-react';
 
 const App: React.FC = () => {
   const [view, setView] = useState<ViewState>(ViewState.ONBOARDING);
@@ -16,32 +18,52 @@ const App: React.FC = () => {
   const [strategicPlan, setStrategicPlan] = useState<StrategicPlan | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
 
-  // Load initial data
+  // Load initial data from IndexedDB
   useEffect(() => {
-    const loadedProfile = getProfile();
-    const loadedTasks = getTasks();
-    const loadedChat = getChatHistory();
-    const loadedPlan = getStrategicPlan();
+    const init = async () => {
+      try {
+        const [loadedProfile, loadedTasks, loadedChat, loadedPlan] = await Promise.all([
+          getProfile(),
+          getTasks(),
+          getChatHistory(),
+          getStrategicPlan()
+        ]);
 
-    if (loadedProfile && loadedProfile.isSetup) {
-      setProfile(loadedProfile);
-      setTasks(loadedTasks);
-      setChatHistory(loadedChat);
-      setStrategicPlan(loadedPlan);
-      setView(ViewState.DASHBOARD);
-    } else {
-      setView(ViewState.ONBOARDING);
-    }
-    setIsInitialized(true);
+        if (loadedProfile && loadedProfile.isSetup) {
+          setProfile(loadedProfile);
+          setTasks(loadedTasks);
+          setChatHistory(loadedChat);
+          setStrategicPlan(loadedPlan);
+          setView(ViewState.DASHBOARD);
+        } else {
+          setView(ViewState.ONBOARDING);
+        }
+      } catch (error) {
+        console.error("Failed to load data from DB:", error);
+        // Fallback to onboarding if DB fails
+        setView(ViewState.ONBOARDING);
+      } finally {
+        setIsInitialized(true);
+      }
+    };
+
+    init();
   }, []);
 
-  const handleOnboardingComplete = (newProfile: UserProfile) => {
+  const handleOnboardingComplete = async (newProfile: UserProfile) => {
     setProfile(newProfile);
-    saveProfile(newProfile);
+    await saveProfile(newProfile);
     setView(ViewState.DASHBOARD);
   };
 
-  if (!isInitialized) return null; // Or a loading spinner
+  if (!isInitialized) {
+    return (
+      <div className="h-screen w-screen bg-slate-950 flex flex-col items-center justify-center text-slate-400 gap-4">
+        <Loader2 className="animate-spin text-emerald-500" size={32} />
+        <span className="text-sm font-medium tracking-wider">LOADING DATABASE</span>
+      </div>
+    );
+  }
 
   return (
     <Layout currentView={view} onNavigate={setView}>
@@ -53,7 +75,8 @@ const App: React.FC = () => {
         <Dashboard 
           tasks={tasks} 
           profile={profile} 
-          setTasks={setTasks} 
+          setTasks={setTasks}
+          setProfile={setProfile}
         />
       )}
 
@@ -71,7 +94,8 @@ const App: React.FC = () => {
         <CoachChat 
           history={chatHistory} 
           setHistory={setChatHistory} 
-          profile={profile} 
+          profile={profile}
+          tasks={tasks}
         />
       )}
 

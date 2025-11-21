@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ChatMessage, UserProfile } from '../types';
+import { ChatMessage, UserProfile, Task } from '../types';
 import { sendCoachMessage } from '../services/gemini';
 import { saveChatHistory } from '../services/storage';
 import { Send, Bot, User, Loader2, Trash2 } from 'lucide-react';
@@ -9,9 +9,10 @@ interface CoachChatProps {
   history: ChatMessage[];
   setHistory: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   profile: UserProfile;
+  tasks: Task[];
 }
 
-const CoachChat: React.FC<CoachChatProps> = ({ history, setHistory, profile }) => {
+const CoachChat: React.FC<CoachChatProps> = ({ history, setHistory, profile, tasks }) => {
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -47,7 +48,7 @@ const CoachChat: React.FC<CoachChatProps> = ({ history, setHistory, profile }) =
         parts: [{ text: msg.text }]
       }));
 
-      const responseText = await sendCoachMessage(geminiHistory, userMsg.text, profile);
+      const responseText = await sendCoachMessage(geminiHistory, userMsg.text, profile, tasks);
 
       const modelMsg: ChatMessage = {
         id: crypto.randomUUID(),

@@ -1,13 +1,14 @@
+
 import { GoogleGenAI, Type, Schema } from "@google/genai";
 import { UserProfile, Task, TaskStatus, Resource, Milestone } from "../types";
 
 // Initialize Gemini
-// NOTE: process.env.API_KEY is expected to be available in the environment
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
 const TASK_GENERATION_MODEL = "gemini-2.5-flash";
 const COACH_CHAT_MODEL = "gemini-2.5-flash";
 const STRATEGY_MODEL = "gemini-2.5-flash";
+const EXECUTION_MODEL = "gemini-2.5-flash";
 
 /**
  * Generates a daily task list based on the user's profile and context.
@@ -71,13 +72,23 @@ export const generateDailyTasks = async (profile: UserProfile): Promise<Task[]> 
 };
 
 /**
- * Sends a message to the coach chat.
+ * Sends a message to the coach chat with context of current tasks.
  */
 export const sendCoachMessage = async (
   history: { role: 'user' | 'model'; parts: { text: string }[] }[],
   message: string,
-  profile: UserProfile
+  profile: UserProfile,
+  tasks: Task[] = []
 ) => {
+  const taskContext = tasks.length > 0 
+    ? `Current User Tasks:\n${tasks.map(t => `- [${t.status}] ${t.title} (${t.priority})`).join('\n')}`
+    : "No tasks currently listed for today.";
+
+  // Build Knowledge Context from saved snippets
+  const knowledgeContext = (profile.knowledgeBase && profile.knowledgeBase.length > 0)
+    ? `\nUSER SAVED KNOWLEDGE/CONTEXT (Reference this if relevant):\n${profile.knowledgeBase.map((k, i) => `[Item ${i+1}]: ${k}`).join('\n---\n')}`
+    : "";
+
   const systemInstruction = `
     You are "FocusFlow", a dedicated, no-nonsense, but supportive business coach.
     User Context:
@@ -85,12 +96,17 @@ export const sendCoachMessage = async (
     - Goal: ${profile.mainGoal}
     - Challenge: ${profile.biggestChallenge}
     
+    ${taskContext}
+
+    ${knowledgeContext}
+    
     Style:
     - Keep answers concise (optimized for mobile reading).
     - Be action-oriented. Don't just give theory, give steps.
     - Hold the user accountable.
     - If they complain about being tired/lazy, remind them of their goal.
     - Use bullet points for readability.
+    - If the user asks about their tasks, refer to the specific tasks in the context provided.
   `;
 
   try {
@@ -99,56 +115,61 @@ export const sendCoachMessage = async (
       history: history,
       config: {
         systemInstruction,
+        temperature: 0.7,
       }
     });
 
     const result = await chat.sendMessage({ message });
     return result.text;
   } catch (error) {
-    console.error("Chat error:", error);
-    return "I'm having trouble connecting to my strategy center right now. Please check your connection.";
+    console.error("Chat Error:", error);
+    return "I'm having trouble connecting right now. Let's focus on the tasks at hand.";
   }
 };
 
 /**
- * Generates a strategic breakdown of a goal and suggested resources.
+ * Generates a strategic breakdown of a goal into milestones, resources, and immediate tasks.
  */
-export const generateGoalStrategy = async (
-  goal: string, 
-  profile: UserProfile
-): Promise<{
-  smartGoal: string;
-  milestones: Milestone[];
-  immediateTasks: Task[];
-  resources: Resource[];
-}> => {
+export const generateGoalStrategy = async (goal: string, profile: UserProfile) => {
   const systemInstruction = `
-    You are an expert business strategist. 
-    The user has a goal: "${goal}".
-    Business: ${profile.businessName} (${profile.industry}).
-    Challenge: ${profile.biggestChallenge}.
-
-    1. Refine the goal into a specific SMART goal (Specific, Measurable, Achievable, Relevant, Time-bound).
-    2. Break it down into 4 weekly milestones for a 1-month sprint.
-    3. Create 3 IMMEDIATE, specific, daily tasks to start TODAY.
-    4. Suggest 3 high-quality resources (Books, Podcasts, Tools, Articles) that specifically help with this goal or challenge.
+    You are a strategic business advisor.
+    The user has a main goal: "${goal}".
+    Their business is in the "${profile.industry}" industry.
+    
+    Analyze this goal.
+    1. Refine it into a specific SMART goal.
+    2. Break it down into 4 weekly milestones.
+    3. Suggest 3 relevant educational resources (Books, Podcasts, Tools, etc.).
+    4. Create 3 immediate actionable tasks to start TODAY.
   `;
 
   const responseSchema: Schema = {
     type: Type.OBJECT,
     properties: {
-      smartGoal: { type: Type.STRING, description: "The refined SMART version of the user's goal." },
+      smartGoal: { type: Type.STRING, description: "A specific, measurable, achievable, relevant, and time-bound version of the user's goal." },
       milestones: {
         type: Type.ARRAY,
-        description: "4 weekly milestones",
         items: {
           type: Type.OBJECT,
           properties: {
             week: { type: Type.INTEGER },
-            focus: { type: Type.STRING, description: "Main theme of the week" },
-            action: { type: Type.STRING, description: "Key outcome for the week" }
+            focus: { type: Type.STRING },
+            action: { type: Type.STRING }
           },
           required: ["week", "focus", "action"]
+        }
+      },
+      resources: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            type: { type: Type.STRING, enum: ['Book', 'Podcast', 'Course', 'Tool', 'Article'] },
+            description: { type: Type.STRING },
+            reason: { type: Type.STRING }
+          },
+          required: ["title", "type", "description", "reason"]
         }
       },
       immediateTasks: {
@@ -163,64 +184,76 @@ export const generateGoalStrategy = async (
           },
           required: ["title", "description", "priority", "estimatedTimeMin"]
         }
-      },
-      resources: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING },
-            type: { type: Type.STRING, enum: ["Book", "Podcast", "Course", "Tool", "Article"] },
-            description: { type: Type.STRING, description: "Brief summary of the resource" },
-            reason: { type: Type.STRING, description: "Why this specific resource helps THIS goal." }
-          },
-          required: ["title", "type", "description", "reason"]
-        }
       }
     },
-    required: ["smartGoal", "milestones", "immediateTasks", "resources"]
+    required: ["smartGoal", "milestones", "resources", "immediateTasks"]
   };
+
+  const response = await ai.models.generateContent({
+    model: STRATEGY_MODEL,
+    contents: `Create a strategy for: ${goal}`,
+    config: {
+      systemInstruction,
+      responseMimeType: "application/json",
+      responseSchema,
+    }
+  });
+
+  const data = JSON.parse(response.text || "{}");
+
+  // Post-process to add IDs
+  const resources = (data.resources || []).map((r: any) => ({ ...r, id: crypto.randomUUID() }));
+  const immediateTasks = (data.immediateTasks || []).map((t: any) => ({ 
+    ...t, 
+    id: crypto.randomUUID(), 
+    status: TaskStatus.PENDING,
+    createdAt: new Date().toISOString() 
+  }));
+
+  return {
+    smartGoal: data.smartGoal,
+    milestones: data.milestones,
+    resources: resources,
+    immediateTasks: immediateTasks
+  };
+};
+
+/**
+ * Executes a specific task using AI to generate content, research, or drafts.
+ */
+export const executeTask = async (task: Task, profile: UserProfile): Promise<string> => {
+  const systemInstruction = `
+    You are an AI Business Assistant. Your job is to EXECUTE the task provided by the user to the best of your ability.
+    
+    User Profile:
+    - Business: ${profile.businessName}
+    - Industry: ${profile.industry}
+    
+    Task Title: ${task.title}
+    Task Description: ${task.description}
+    
+    Instructions:
+    - If the task asks for an email, write the full email draft.
+    - If the task asks for research, provide a summarized research report (use your internal knowledge).
+    - If the task asks for a plan, write the detailed steps.
+    - If the task asks for analysis, perform the analysis.
+    - Output FORMAT: Markdown. Use bolding, lists, and clear headers.
+    - Do not just say "Here is the task", just DO the task.
+  `;
 
   try {
     const response = await ai.models.generateContent({
-      model: STRATEGY_MODEL,
-      contents: `Create a strategy for: ${goal}`,
+      model: EXECUTION_MODEL,
+      contents: "Please complete this task for me.",
       config: {
         systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema,
+        temperature: 0.7,
       }
     });
 
-    const data = JSON.parse(response.text || "{}");
-
-    const tasks: Task[] = (data.immediateTasks || []).map((t: any) => ({
-      id: crypto.randomUUID(),
-      title: t.title,
-      description: t.description,
-      priority: t.priority,
-      estimatedTimeMin: t.estimatedTimeMin,
-      status: TaskStatus.PENDING,
-      createdAt: new Date().toISOString()
-    }));
-
-    const resources: Resource[] = (data.resources || []).map((r: any) => ({
-      id: crypto.randomUUID(),
-      title: r.title,
-      type: r.type,
-      description: r.description,
-      reason: r.reason
-    }));
-
-    return {
-      smartGoal: data.smartGoal || goal,
-      milestones: data.milestones || [],
-      immediateTasks: tasks,
-      resources: resources
-    };
-
+    return response.text || "I tried to complete the task but couldn't generate a result. Please try again.";
   } catch (error) {
-    console.error("Strategy generation error:", error);
-    throw new Error("Failed to generate strategy.");
+    console.error("Task Execution Error:", error);
+    return "Error executing task. Please check your connection.";
   }
 };
